@@ -1,110 +1,56 @@
 const std = @import("std");
-pub fn main() !void {
-    const file = std.fs.cwd().openFile("/home/Paolo/code/zig-playground/example.zig", .{ .mode = .read_write }) catch @panic("error opening file");
-    var buf: [256]u8 = undefined;
-    const file_size = file.read(buf[0..]) catch @panic("error reading file");
-    std.debug.print("{s}", .{buf[0..file_size]});
+const ast = std.zig.Ast;
 
-    // Parse Zig AST
+pub fn main() !void {
+    var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_allocator.deinit();
+    injectLogCalls(arena_allocator.allocator(), std.Io.Dir.openDir()));
+
+    // var idx: [1]ast.Node.Index = undefined;
+    // const function_prototype = tree.fnProto(@enumFromInt(1));
+
+    // std.debug.print("{d}\n", .{function_prototype.ast.});
+    // std.debug.print("Node's tag name is {s}.\n", .{fn_proto.?.ast.proto_node});
+}
+
+fn injectLogCalls(allocator: std.mem.Allocator, project_directory: std.fs.Dir) void {
+    const hash_map: std.StringHashMap(ast) = undefined;
+    const files = detecZigFiles(project_directory);
+}
+
+fn detectZigFiles(project_directory: std.fs.Dir) []std.fs.File {
+    const allocator = std.heap.page_allocator;
+    std.fs.Dir.walk(project_directory, allocator);
+}
+
+fn parseZigFiles() []ast {
+    const file = std.fs.cwd().openFile("/home/Paolo/code/zig-playground/example.zig", .{ .mode = .read_write }) catch @panic("error opening file");
+    var buf: [512]u8 = undefined;
+    const file_size = file.read(buf[0..]) catch @panic("error reading file");
+
     var gpa = std.heap.DebugAllocator(.{}).init;
-    // Now create the sentinel slice
     buf[file_size] = 0;
     const source: [:0]const u8 = buf[0..file_size :0];
-    const ast = try std.zig.Ast.parse(gpa.allocator(), source, .zig);
-    // catch |err| @panic(@errorName(err));
-    std.debug.print("{}", .{ast});
+    const tree = try ast.parse(gpa.allocator(), source, .zig);
+}
 
-    _ = gpa.deinit();
+fn getTokens(buf: []u8, tree: ast) []u8 {
+    std.debug.print("getTokens\n", .{});
+    var total_len: usize = 0;
+    for (0..tree.tokens.len) |i| {
+        const slice = tree.tokenSlice(@intCast(i));
+        tree.tokenStart())
+        @memmove(buf[total_len .. total_len + slice.len], slice);
+        total_len += slice.len;
+    }
 
-    // std.debug.print("{}", .{ast});
+    // TODO: 
+    // 1. get token tags via tree.tokenTag()
+    // 2. detect function declarations using the tags, you will have something like fn + identifier + open bracket + ...
+    // 3. use tree.tokenStart() to get the byte offset of the function's open bracket { in the source code
+    // 4. copy the source code buffer
+    // 5. into the copied buffer, inject a log call that prints at least the identifier of the function you found at step 2
+    // 6. save the file to the original location
 
-    // const tree = ast.tree;
-    // const tokens = tree.tokens;
-
-    // var insert_offset: ?usize = null;
-    // var param_print: []u8 = &[]; // will hold generated format string
-
-    // // Walk top-level declarations
-    // for (tree.rootDecls()) |decl| {
-    //     if (tree.nodeTag(decl) != .fn_decl)
-    //         continue;
-
-    //     const fn_decl = tree.nodeData(decl).fn_decl;
-    //     const name_token = fn_decl.name_token orelse continue;
-    //     const fn_name = tree.tokenSlice(name_token);
-
-    //     if (!std.mem.eql(u8, fn_name, "main"))
-    //         continue;
-
-    //     // Prepare logging code
-    //     const body_node = fn_decl.body_node orelse continue;
-    //     if (tree.nodeTag(body_node) != .block)
-    //         continue;
-    //     const block = tree.nodeData(body_node).block;
-    //     const lbrace_token = block.lbrace_token;
-    //     const token_start = tokens.items(.start)[lbrace_token];
-    //     const token_len = tokens.items(.len)[lbrace_token];
-    //     insert_offset = token_start + token_len;
-
-    //     // Collect parameter logging
-    //     var builder = std.StringBuilder.init(allocator);
-    //     try builder.append("std.debug.print(\"ENTER main");
-    //     var first = true;
-
-    //     for (fn_decl.params) |param| {
-    //         const name_token = param.name_token orelse continue;
-    //         const param_name = tree.tokenSlice(name_token);
-    //         const type_expr = param.type orelse continue;
-    //         const type_name = tree.tokenSlice(type_expr);
-
-    //         // Only log simple supported types
-    //         var fmt: []const u8 = "";
-    //         if (std.mem.eql(u8, type_name, "i32") or std.mem.eql(u8, type_name, "u32") or
-    //             std.mem.eql(u8, type_name, "f32") or std.mem.eql(u8, type_name, "f64") or
-    //             std.mem.eql(u8, type_name, "u8") or std.mem.eql(u8, type_name, "char"))
-    //         {
-    //             fmt = " = {d}";
-    //         } else if (std.mem.eql(u8, type_name, "[]const u8")) {
-    //             fmt = " = {s}";
-    //         } else {
-    //             continue; // skip unsupported types
-    //         }
-
-    //         if (first) first = false; else try builder.append(", ");
-    //         try builder.append(param_name);
-    //         try builder.append(fmt);
-    //     }
-    //     try builder.append("\\n\", .{");
-
-    //     first = true;
-    //     for (fn_decl.params) |param| {
-    //         const name_token = param.name_token orelse continue;
-    //         const param_name = tree.tokenSlice(name_token);
-    //         const type_expr = param.type orelse continue;
-    //         const type_name = tree.tokenSlice(type_expr);
-
-    //         if (std.mem.eql(u8, type_name, "i32") or std.mem.eql(u8, type_name, "u32") or
-    //             std.mem.eql(u8, type_name, "f32") or std.mem.eql(u8, type_name, "f64") or
-    //             std.mem.eql(u8, type_name, "u8") or std.mem.eql(u8, type_name, "char") or
-    //             std.mem.eql(u8, type_name, "[]const u8"))
-    //         {
-    //             if (first) first = false; else try builder.append(", ");
-    //             try builder.append(param_name);
-    //         }
-    //     }
-    //     try builder.append("});\n");
-
-    //     param_print = try builder.toOwnedSlice();
-    //     break;
-    // }
-
-    // if (insert_offset == null) {
-    //     std.debug.print("main function not found\n", .{});
-    //     return;
-    // }
-
-    // // Emit modified source
-    // try std.io.getStdOut().writer().writeAll(source[0..insert_offset.?]);
-    // try std.io.getStdOut().writer().writeAll(param_print);
-    // try std.io.getStdOut().writer().writeAll(source[insert_offset.?..]);
+    return buf[0..total_len];
 }
