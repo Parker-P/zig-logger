@@ -4,7 +4,9 @@ const ast = std.zig.Ast;
 pub fn main() !void {
     var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_allocator.deinit();
-    injectLogCalls(arena_allocator.allocator(), std.fs.openDirAbsolute("/home/Paolo/code/zig-playground", .{ .iterate = true }) catch |e| @panic(@errorName(e)));
+    // injectLogCalls(arena_allocator.allocator(), "/home/Paolo/code/zig-playground");
+    // injectLogCalls(arena_allocator.allocator(), "C:/code/zig-logger/src");
+    injectLogCalls(arena_allocator.allocator(), "C:/code/zig-logger/src");
 
     // var idx: [1]ast.Node.Index = undefined;
     // const function_prototype = tree.fnProto(@enumFromInt(1));
@@ -13,11 +15,18 @@ pub fn main() !void {
     // std.debug.print("Node's tag name is {s}.\n", .{fn_proto.?.ast.proto_node});
 }
 
-fn injectLogCalls(allocator: std.mem.Allocator, project_directory: []u8) void {
+fn injectLogCalls(allocator: std.mem.Allocator, project_directory: []const u8) void {
     // const hash_map: std.StringHashMap(ast) = undefined;
     // const files = detecZigFiles(project_directory);
 
-    const f = detectZigFiles(allocator, project_directory);
+    std.debug.print("Injecting log calls project dir is {s}\n", .{project_directory});
+
+    // const f = detectZigFiles(allocator, project_directory);
+    var f = detectZigFiles(allocator, project_directory);
+    defer f.deinit(allocator);
+
+    std.debug.print("Discovered files are {any}\n", .{f});
+
     for (0..f.items.len) |i| {
         var tree = parseZigFile(allocator, f.items[i]) catch |e| @panic(@errorName(e));
         defer tree.deinit(allocator);
@@ -25,9 +34,12 @@ fn injectLogCalls(allocator: std.mem.Allocator, project_directory: []u8) void {
     }
 }
 
-fn detectZigFiles(allocator: std.mem.Allocator, project_directory: std.fs.Dir) std.ArrayList([]u8) {
-    var zig_files = std.ArrayList([]u8).allocatedSlice();
-    var walker = std.fs.Dir.walk(project_directory, allocator) catch |e| @panic(@errorName(e));
+fn detectZigFiles(allocator: std.mem.Allocator, project_directory: []const u8) std.ArrayList([]u8) {
+    var zig_files: std.ArrayList([]u8) = .empty;
+
+    const dir_handle = std.fs.openDirAbsolute(project_directory, .{ .iterate = true }) catch |e| @panic(@errorName(e));
+
+    var walker = std.fs.Dir.walk(dir_handle, allocator) catch |e| @panic(@errorName(e));
     defer walker.deinit();
 
     var file_count: usize = 0;
@@ -44,18 +56,18 @@ fn detectZigFiles(allocator: std.mem.Allocator, project_directory: std.fs.Dir) s
 
         if (!std.mem.endsWith(u8, full_path, ".zig")) continue;
 
+        std.debug.print("Discovered {s}\n", .{full_path});
         zig_files.append(allocator, full_path) catch |e| @panic(@errorName(e));
         file_count += 1;
     }
 
-    std.debug.print("{any}\n", .{zig_files});
     return zig_files;
 }
 
 fn parseZigFile(allocator: std.mem.Allocator, file_path: []u8) !ast {
     std.debug.print("Parsing file {any}\n", .{file_path});
     var file = std.fs.openFileAbsolute(file_path, .{ .mode = .read_write }) catch |e| @panic(@errorName(e));
-    var buf: [512]u8 = undefined;
+    var buf: [500000]u8 = undefined;
     const file_size = try file.read(buf[0..]);
     buf[file_size] = 0;
     const source: [:0]const u8 = buf[0..file_size :0];
