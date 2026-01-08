@@ -25,12 +25,12 @@ fn injectLogCalls(allocator: std.mem.Allocator, project_directory: []const u8) v
     var f = detectZigFiles(allocator, project_directory);
     defer f.deinit(allocator);
 
-    std.debug.print("Discovered files are {any}\n", .{f});
+    // std.debug.print("Discovered files are {any}\n", .{f});
 
     for (0..f.items.len) |i| {
         var tree = parseZigFile(allocator, f.items[i]) catch |e| @panic(@errorName(e));
         defer tree.deinit(allocator);
-        getTokens(tree);
+        getTokens(allocator, tree);
     }
 }
 
@@ -56,7 +56,6 @@ fn detectZigFiles(allocator: std.mem.Allocator, project_directory: []const u8) s
 
         if (!std.mem.endsWith(u8, full_path, ".zig")) continue;
 
-        std.debug.print("Discovered {s}\n", .{full_path});
         zig_files.append(allocator, full_path) catch |e| @panic(@errorName(e));
         file_count += 1;
     }
@@ -65,7 +64,6 @@ fn detectZigFiles(allocator: std.mem.Allocator, project_directory: []const u8) s
 }
 
 fn parseZigFile(allocator: std.mem.Allocator, file_path: []u8) !ast {
-    std.debug.print("Parsing file {any}\n", .{file_path});
     var file = std.fs.openFileAbsolute(file_path, .{ .mode = .read_write }) catch |e| @panic(@errorName(e));
     var buf: [500000]u8 = undefined;
     const file_size = try file.read(buf[0..]);
@@ -74,9 +72,9 @@ fn parseZigFile(allocator: std.mem.Allocator, file_path: []u8) !ast {
     return try ast.parse(allocator, source, .zig);
 }
 
-fn getTokens(tree: ast) void {
+fn getTokens(allocator: std.mem.Allocator, tree: ast) void {
     std.debug.print("getTokens\n", .{});
-    _ = tree;
+    // _ = tree;
     // var total_len: usize = 0;
     // for (0..tree.tokens.len) |i| {
     //     const slice = tree.tokenSlice(@intCast(i));
@@ -92,6 +90,14 @@ fn getTokens(tree: ast) void {
     // 4. copy the source code buffer
     // 5. into the copied buffer, inject a log call that prints at least the identifier of the function you found at step 2
     // 6. save the file to the original location
+
+    var tags: std.ArrayList(std.zig.Token.Tag) = .empty;
+    defer tags.deinit(allocator);
+    for (0..tree.tokens.len) |i| {
+        tags.append(allocator, tree.tokenTag(@intCast(i))) catch |e| @panic(@errorName(e));
+    }
+
+    std.debug.print("Tags are {any}\n", .{tags});
 
     // return buf[0..total_len];
     // return buf[0..1];
