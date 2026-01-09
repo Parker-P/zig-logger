@@ -1,6 +1,36 @@
 const std = @import("std");
 const ast = std.zig.Ast;
 
+const LogContext = struct {
+    allocator: std.mem.Allocator,
+    function_name: []const u8,
+    byte_offset: usize,
+    parameter_names: std.ArrayList([]const u8),
+
+    fn init(self: *LogContext, allocator: std.mem.Allocator) void {
+        self.* = .{
+            .allocator = allocator,
+            .function_name = undefined,
+            .byte_offset = undefined,
+            .parameter_names = .empty,
+        };
+    }
+
+    fn deinit(self: *LogContext) void {
+        for (self.parameter_names.items) |name| {
+            self.allocator.free(name);
+        }
+        self.parameter_names.deinit(self.allocator);
+    }
+
+    fn addParameterName(self: *LogContext, name: []const u8) !void {
+        const owned = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(owned);
+
+        try self.parameter_names.append(self.allocator, owned);
+    }
+};
+
 pub fn main() !void {
     var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_allocator.deinit();
@@ -25,13 +55,20 @@ fn injectLogCalls(allocator: std.mem.Allocator, project_directory: []const u8) v
     var f = detectZigFiles(allocator, project_directory);
     defer f.deinit(allocator);
 
-    // std.debug.print("Discovered files are {any}\n", .{f});
+    var tree = parseZigFile(allocator, f.items[0]) catch |e| @panic(@errorName(e));
+    defer tree.deinit(allocator);
 
-    for (0..f.items.len) |i| {
-        var tree = parseZigFile(allocator, f.items[i]) catch |e| @panic(@errorName(e));
-        defer tree.deinit(allocator);
-        getTokens(allocator, tree);
-    }
+    // You need:
+    // 1. The offset in the file where to place the log call
+    // 2. The argument names and types, so you can better format them
+    getFunctionInfo(allocator, tree, f.items[0]);
+
+    // std.debug.print("Discovered files are {any}\n", .{f});
+    // for (0..f.items.len) |i| {
+    //     var tree = parseZigFile(allocator, f.items[i]) catch |e| @panic(@errorName(e));
+    //     defer tree.deinit(allocator);
+    //     getTokens(allocator, tree);
+    // }
 }
 
 fn detectZigFiles(allocator: std.mem.Allocator, project_directory: []const u8) std.ArrayList([]u8) {
@@ -72,17 +109,7 @@ fn parseZigFile(allocator: std.mem.Allocator, file_path: []u8) !ast {
     return try ast.parse(allocator, source, .zig);
 }
 
-fn getTokens(allocator: std.mem.Allocator, tree: ast) void {
-    std.debug.print("getTokens\n", .{});
-    // _ = tree;
-    // var total_len: usize = 0;
-    // for (0..tree.tokens.len) |i| {
-    //     const slice = tree.tokenSlice(@intCast(i));
-    //     tree.tokenStart();
-    //     @memmove(buf[total_len .. total_len + slice.len], slice);
-    //     total_len += slice.len;
-    // }
-
+fn getFunctionInfo(allocator: std.mem.Allocator, tree: ast, file_path: []u8) void {
     // TODO:
     // 1. get token tags via tree.tokenTag()
     // 2. detect function declarations using the tags, you will have something like fn + identifier + open bracket + ...
@@ -91,14 +118,60 @@ fn getTokens(allocator: std.mem.Allocator, tree: ast) void {
     // 5. into the copied buffer, inject a log call that prints at least the identifier of the function you found at step 2
     // 6. save the file to the original location
 
-    var tags: std.ArrayList(std.zig.Token.Tag) = .empty;
-    defer tags.deinit(allocator);
-    for (0..tree.tokens.len) |i| {
-        tags.append(allocator, tree.tokenTag(@intCast(i))) catch |e| @panic(@errorName(e));
+    const TokenTag = std.zig.Token.Tag;
+    var log_ctxs: std.ArrayList(LogContext) = .empty;
+    defer log_ctxs.deinit(allocator);
+    var i: i32 = -1;
+    while (i < tree.tokens.len - 1) {
+        i += 1;
+        var tag = tree.tokenTag(@intCast(i));
+        if (tag != TokenTag.keyword_fn) continue;
+        i += 1;
+        tag = tree.tokenTag(@intCast(i));
+        if (tag != TokenTag.identifier) continue;
+        var log_context: LogContext = undefined;
+        log_context.init(allocator);
+        log_context.function_name = tree.tokenSlice(@intCast(i));
+        i += 1;
+        tag = tree.tokenTag(@intCast(i));
+        if (tag != TokenTag.l_paren) continue;
+        i += 1;
+
+        while (tag != TokenTag.r_paren or tag != TokenTag.eof) {
+            tag = tree.tokenTag(@intCast(i));
+            if (tag == TokenTag.comma) {
+                i += 1;
+                tag = tree.tokenTag(@intCast(i));
+            }
+            if (tag != TokenTag.identifier) break;
+            log_context.addParameterName(tree.tokenSlice(@intCast(i))) catch |e| @panic(@errorName(e));
+            i += 1;
+            tag = tree.tokenTag(@intCast(i));
+            if (tag != TokenTag.colon) break;
+            i += 1;
+            tag = tree.tokenTag(@intCast(i));
+            if (tag != TokenTag.identifier) break;
+            i += 1;
+        }
+
+        if (tag != TokenTag.r_paren) continue;
+        i += 1;
+        tag = tree.tokenTag(@intCast(i));
+        if (tag != TokenTag.identifier) continue;
+        i += 1;
+        tag = tree.tokenTag(@intCast(i));
+        if (tag != TokenTag.l_brace) continue;
+        log_context.byte_offset = @intCast(tree.tokenStart(@intCast(i)) + 1);
+        log_ctxs.append(allocator, log_context) catch |e| @panic(@errorName(e));
     }
 
-    std.debug.print("Tags are {any}\n", .{tags});
+    std.debug.print("File {s} function name is {s}, offset is {d} parameters are {any}\n", .{ file_path, log_ctxs.items[0].function_name, log_ctxs.items[0].byte_offset, log_ctxs.items[0].parameter_names });
+
+    // var logString: [256]u8 = undefined;
+    // std.fmt.bufPrint(buf: []u8, comptime fmt: []const u8, args: anytype)
 
     // return buf[0..total_len];
     // return buf[0..1];
 }
+
+// fn isTokenStartOfFunctionDeclaration(tree: ast, i: ast.TokenIndex) false!struct {} {}
