@@ -39,40 +39,17 @@ pub fn main() !void {
     var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_allocator.deinit();
     // injectLogCalls(arena_allocator.allocator(), "/home/Paolo/code/zig-playground");
-    // injectLogCalls(arena_allocator.allocator(), "C:/code/zig-logger/src");
     injectLogCalls(arena_allocator.allocator(), "C:/code/zig-logger/src");
-
-    // var idx: [1]ast.Node.Index = undefined;
-    // const function_prototype = tree.fnProto(@enumFromInt(1));
-
-    // std.debug.print("{d}\n", .{function_prototype.ast.});
-    // std.debug.print("Node's tag name is {s}.\n", .{fn_proto.?.ast.proto_node});
 }
 
 fn injectLogCalls(allocator: std.mem.Allocator, project_directory: []const u8) void {
-    // const hash_map: std.StringHashMap(ast) = undefined;
-    // const files = detecZigFiles(project_directory);
-
-    std.debug.print("Injecting log calls project dir is {s}\n", .{project_directory});
-
-    // const f = detectZigFiles(allocator, project_directory);
     var f = detectZigFiles(allocator, project_directory);
     defer f.deinit(allocator);
 
     var tree = parseZigFile(allocator, f.items[0]) catch |e| @panic(@errorName(e));
     defer tree.deinit(allocator);
 
-    // You need:
-    // 1. The offset in the file where to place the log call
-    // 2. The argument names and types, so you can better format them
     getFunctionInfo(allocator, tree, f.items[0]);
-
-    // std.debug.print("Discovered files are {any}\n", .{f});
-    // for (0..f.items.len) |i| {
-    //     var tree = parseZigFile(allocator, f.items[i]) catch |e| @panic(@errorName(e));
-    //     defer tree.deinit(allocator);
-    //     getTokens(allocator, tree);
-    // }
 }
 
 fn detectZigFiles(allocator: std.mem.Allocator, project_directory: []const u8) std.ArrayList([]u8) {
@@ -114,14 +91,6 @@ fn parseZigFile(allocator: std.mem.Allocator, file_path: []u8) !ast {
 }
 
 fn getFunctionInfo(allocator: std.mem.Allocator, tree: ast, file_path: []u8) void {
-    // TODO:
-    // 1. get token tags via tree.tokenTag()
-    // 2. detect function declarations using the tags, you will have something like fn + identifier + open bracket + ...
-    // 3. use tree.tokenStart() to get the byte offset of the function's open bracket { in the source code
-    // 4. copy the source code buffer
-    // 5. into the copied buffer, inject a log call that prints at least the identifier of the function you found at step 2
-    // 6. save the file to the original location
-
     const TokenTag = std.zig.Token.Tag;
     var log_ctxs: std.ArrayList(LogContext) = .empty;
     defer log_ctxs.deinit(allocator);
@@ -172,43 +141,43 @@ fn getFunctionInfo(allocator: std.mem.Allocator, tree: ast, file_path: []u8) voi
         log_ctxs.append(allocator, log_context) catch |e| @panic(@errorName(e));
     }
 
-    std.debug.print("File {s} @ {d}:{d} - {s}, offset is {d} parameters are {any}\n", .{
-        log_ctxs.items[0].file_name,
-        log_ctxs.items[0].function_location.line,
-        log_ctxs.items[0].function_location.column,
-        log_ctxs.items[0].function_name,
-        log_ctxs.items[0].byte_offset,
-        log_ctxs.items[0].parameter_names,
-    });
+    for (0..log_ctxs.items.len) |ictx| {
+        var log_instruction: [200]u8 = undefined;
+        const tmp = "std.log.info(\"%file_name% @ %line%:%column% - %funcion_name%: {any}\", .{%parameters%});";
+        @memcpy(log_instruction[0..tmp.len], tmp[0..]);
+        var buf: [64]u8 = undefined;
+        _ = std.mem.replace(u8, log_instruction[0..], "%file_name%", log_ctxs.items[ictx].file_name, log_instruction[0..]);
+        _ = std.mem.replace(u8, log_instruction[0..], "%line%", toString(buf[0..], log_ctxs.items[ictx].function_location.line), log_instruction[0..]);
+        _ = std.mem.replace(u8, log_instruction[0..], "%column%", toString(buf[0..], log_ctxs.items[ictx].function_location.column), log_instruction[0..]);
+        _ = std.mem.replace(u8, log_instruction[0..], "%funcion_name%", log_ctxs.items[ictx].function_name, log_instruction[0..]);
 
-    // const bytes_written = std.fmt.bufPrint(buf[0..], "file_name = {any}, function_location.line = {any}", .{ log_ctxs.items[0].file_name, log_ctxs.items[0].function_location.line }) catch |e| @panic(@errorName(e));
+        var parameters: [128]u8 = undefined;
+        @memcpy(parameters[0..2], ".{");
+        const p_names = log_ctxs.items[ictx].parameter_names.items;
+        var k: usize = 2;
+        for (0..p_names.len) |j| {
+            @memcpy(parameters[k .. k + 1], ".");
+            k += 1;
+            @memcpy(parameters[k .. k + p_names[j].len], p_names[j]);
+            k += p_names[j].len;
+            @memcpy(parameters[k .. k + 3], " = ");
+            k += 3;
+            @memcpy(parameters[k .. k + p_names[j].len], p_names[j]);
+            k += p_names[j].len;
+            if (j < p_names.len - 1) {
+                @memcpy(parameters[k .. k + 2], ", ");
+                k += 2;
+            }
+        }
 
-    var log_instruction: [200]u8 = undefined;
-
-    const tmp = "std.log.info(\"%file_name% @ %line%:%column% - %funcion_name%: %parameters_format%\\n\", .{%parameters%});";
-    @memcpy(log_instruction[0..tmp.len], tmp[0..]);
-    var buf: [256]u8 = undefined;
-    _ = std.mem.replace(u8, log_instruction[0..], "%file_name%", log_ctxs.items[0].file_name, log_instruction[0..]);
-    _ = std.mem.replace(u8, log_instruction[0..], "%line%", toString(buf[0..], log_ctxs.items[0].function_location.line), log_instruction[0..]);
-    _ = std.mem.replace(u8, log_instruction[0..], "%column%", toString(buf[0..], log_ctxs.items[0].function_location.column), log_instruction[0..]);
-    _ = std.mem.replace(u8, log_instruction[0..], "%funcion_name%", log_ctxs.items[0].function_name, log_instruction[0..]);
-    const last = std.mem.find(u8, log_instruction[0..], &[_]u8{';'});
-    std.debug.print("{s}\n", .{log_instruction[0 .. last.? + 1]});
-
-    // var parameters_format: [128]u8 = undefined;
-    // var parameters: [128]u8 = undefined;
-    // for (0..log_ctxs[0].parameter_names.len) |j| {
-    //     @memcpy(parameters[0..log_ctxs[0].parameter_names[j].len], log_ctxs[0].parameter_names[j]);
-    // }
-
-    // insertText(file_path, log_ctxs.items[0].byte_offset, temp);
+        @memcpy(parameters[k .. k + 1], "}");
+        k += 1;
+        var buf1: [256]u8 = undefined;
+        _ = std.mem.replace(u8, log_instruction[0..], "%parameters%", parameters[0..k], buf1[0..]);
+        const last = std.mem.find(u8, buf1[0..], &[_]u8{';'});
+        insertText(file_path, log_ctxs.items[ictx].byte_offset, buf1[0 .. last.? + 1]);
+    }
 }
-
-// fn replace(comptime T: type, input: []const T, needle: []const T, replacement: []const T) void {
-//     const size = std.mem.replacementSize(T, input, needle, replacement);
-//     const buf: [size]T = undefined;
-//     std.mem.replace(T, input, "%file_name%", needle, buf);
-// }
 
 fn toString(buf: []u8, value: anytype) []u8 {
     return std.fmt.bufPrint(buf[0..], "{any}", .{value}) catch |e| @panic(@errorName(e));
