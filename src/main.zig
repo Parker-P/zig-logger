@@ -3,6 +3,8 @@ const ast = std.zig.Ast;
 
 const LogContext = struct {
     allocator: std.mem.Allocator,
+    file_name: []const u8,
+    function_location: std.zig.Ast.Location,
     function_name: []const u8,
     byte_offset: usize,
     parameter_names: std.ArrayList([]const u8),
@@ -10,6 +12,8 @@ const LogContext = struct {
     fn init(self: *LogContext, allocator: std.mem.Allocator) void {
         self.* = .{
             .allocator = allocator,
+            .file_name = undefined,
+            .function_location = undefined,
             .function_name = undefined,
             .byte_offset = undefined,
             .parameter_names = .empty,
@@ -131,7 +135,10 @@ fn getFunctionInfo(allocator: std.mem.Allocator, tree: ast, file_path: []u8) voi
         if (tag != TokenTag.identifier) continue;
         var log_context: LogContext = undefined;
         log_context.init(allocator);
+        log_context.file_name = std.fs.path.basename(file_path);
         log_context.function_name = tree.tokenSlice(@intCast(i));
+        log_context.function_location = tree.tokenLocation(0, @intCast(i));
+        log_context.function_location.line += 1;
         i += 1;
         tag = tree.tokenTag(@intCast(i));
         if (tag != TokenTag.l_paren) continue;
@@ -165,13 +172,59 @@ fn getFunctionInfo(allocator: std.mem.Allocator, tree: ast, file_path: []u8) voi
         log_ctxs.append(allocator, log_context) catch |e| @panic(@errorName(e));
     }
 
-    std.debug.print("File {s} function name is {s}, offset is {d} parameters are {any}\n", .{ file_path, log_ctxs.items[0].function_name, log_ctxs.items[0].byte_offset, log_ctxs.items[0].parameter_names });
+    std.debug.print("File {s} @ {d}:{d} - {s}, offset is {d} parameters are {any}\n", .{
+        log_ctxs.items[0].file_name,
+        log_ctxs.items[0].function_location.line,
+        log_ctxs.items[0].function_location.column,
+        log_ctxs.items[0].function_name,
+        log_ctxs.items[0].byte_offset,
+        log_ctxs.items[0].parameter_names,
+    });
 
-    // var logString: [256]u8 = undefined;
-    // std.fmt.bufPrint(buf: []u8, comptime fmt: []const u8, args: anytype)
+    // const bytes_written = std.fmt.bufPrint(buf[0..], "file_name = {any}, function_location.line = {any}", .{ log_ctxs.items[0].file_name, log_ctxs.items[0].function_location.line }) catch |e| @panic(@errorName(e));
 
-    // return buf[0..total_len];
-    // return buf[0..1];
+    var log_instruction: [200]u8 = undefined;
+
+    const tmp = "std.log.info(\"%file_name% @ %line%:%column% - %funcion_name%: %parameters_format%\\n\", .{%parameters%});";
+    @memcpy(log_instruction[0..tmp.len], tmp[0..]);
+    var buf: [256]u8 = undefined;
+    _ = std.mem.replace(u8, log_instruction[0..], "%file_name%", log_ctxs.items[0].file_name, log_instruction[0..]);
+    _ = std.mem.replace(u8, log_instruction[0..], "%line%", toString(buf[0..], log_ctxs.items[0].function_location.line), log_instruction[0..]);
+    _ = std.mem.replace(u8, log_instruction[0..], "%column%", toString(buf[0..], log_ctxs.items[0].function_location.column), log_instruction[0..]);
+    _ = std.mem.replace(u8, log_instruction[0..], "%funcion_name%", log_ctxs.items[0].function_name, log_instruction[0..]);
+    const last = std.mem.find(u8, log_instruction[0..], &[_]u8{';'});
+    std.debug.print("{s}\n", .{log_instruction[0 .. last.? + 1]});
+
+    // var parameters_format: [128]u8 = undefined;
+    // var parameters: [128]u8 = undefined;
+    // for (0..log_ctxs[0].parameter_names.len) |j| {
+    //     @memcpy(parameters[0..log_ctxs[0].parameter_names[j].len], log_ctxs[0].parameter_names[j]);
+    // }
+
+    // insertText(file_path, log_ctxs.items[0].byte_offset, temp);
+}
+
+// fn replace(comptime T: type, input: []const T, needle: []const T, replacement: []const T) void {
+//     const size = std.mem.replacementSize(T, input, needle, replacement);
+//     const buf: [size]T = undefined;
+//     std.mem.replace(T, input, "%file_name%", needle, buf);
+// }
+
+fn toString(buf: []u8, value: anytype) []u8 {
+    return std.fmt.bufPrint(buf[0..], "{any}", .{value}) catch |e| @panic(@errorName(e));
+}
+
+fn insertText(file_path: []const u8, offset: usize, text: []const u8) void {
+    const file = std.fs.openFileAbsolute(file_path, .{ .mode = .read_write }) catch |e| @panic(@errorName(e));
+    var buf: [500000]u8 = undefined;
+    var tmp: [500000]u8 = undefined;
+    const byte_count = file.read(buf[0..]) catch |e| @panic(@errorName(e));
+    const new_byte_count = byte_count + text.len;
+    @memcpy(tmp[0..offset], buf[0..offset]);
+    @memcpy(tmp[offset .. offset + text.len], text);
+    @memcpy(tmp[offset + text.len .. new_byte_count], buf[offset..byte_count]);
+    file.seekTo(0) catch |e| @panic(@errorName(e));
+    file.writeAll(tmp[0..new_byte_count]) catch |e| @panic(@errorName(e));
 }
 
 // fn isTokenStartOfFunctionDeclaration(tree: ast, i: ast.TokenIndex) false!struct {} {}
