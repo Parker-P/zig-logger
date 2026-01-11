@@ -43,13 +43,15 @@ pub fn main() !void {
 }
 
 fn injectLogCalls(allocator: std.mem.Allocator, project_directory: []const u8) void {
-    var f = detectZigFiles(allocator, project_directory);
-    defer f.deinit(allocator);
+    var zig_file_paths = detectZigFiles(allocator, project_directory);
+    defer zig_file_paths.deinit(allocator);
 
-    var tree = parseZigFile(allocator, f.items[0]) catch |e| @panic(@errorName(e));
-    defer tree.deinit(allocator);
-
-    getFunctionInfo(allocator, tree, f.items[0]);
+    for (0..zig_file_paths.items.len) |i| {
+        var tree = parseZigFile(allocator, zig_file_paths.items[i]) catch |e| @panic(@errorName(e));
+        const functions_info = getFunctionsInfo(allocator, tree, zig_file_paths.items[i]);
+        injectLogInstructions();
+        tree.deinit(allocator);
+    }
 }
 
 fn detectZigFiles(allocator: std.mem.Allocator, project_directory: []const u8) std.ArrayList([]u8) {
@@ -90,7 +92,7 @@ fn parseZigFile(allocator: std.mem.Allocator, file_path: []u8) !ast {
     return try ast.parse(allocator, source, .zig);
 }
 
-fn getFunctionInfo(allocator: std.mem.Allocator, tree: ast, file_path: []u8) void {
+fn getFunctionsInfo(allocator: std.mem.Allocator, tree: ast, file_path: []u8) std.ArrayList(LogContext) {
     const TokenTag = std.zig.Token.Tag;
     var log_ctxs: std.ArrayList(LogContext) = .empty;
     defer log_ctxs.deinit(allocator);
@@ -141,42 +143,51 @@ fn getFunctionInfo(allocator: std.mem.Allocator, tree: ast, file_path: []u8) voi
         log_ctxs.append(allocator, log_context) catch |e| @panic(@errorName(e));
     }
 
-    for (0..log_ctxs.items.len) |ictx| {
+    return log_ctxs;
+}
+
+fn injectLogInstructions(log_ctxs: std.ArrayList(LogContext), file_path: []const u8) void {
+    for (0..log_ctxs.items.len) |i| {
         var log_instruction: [200]u8 = undefined;
-        const tmp = "std.log.info(\"%file_name% @ %line%:%column% - %funcion_name%: {any}\", .{%parameters%});";
-        @memcpy(log_instruction[0..tmp.len], tmp[0..]);
-        var buf: [64]u8 = undefined;
-        _ = std.mem.replace(u8, log_instruction[0..], "%file_name%", log_ctxs.items[ictx].file_name, log_instruction[0..]);
-        _ = std.mem.replace(u8, log_instruction[0..], "%line%", toString(buf[0..], log_ctxs.items[ictx].function_location.line), log_instruction[0..]);
-        _ = std.mem.replace(u8, log_instruction[0..], "%column%", toString(buf[0..], log_ctxs.items[ictx].function_location.column), log_instruction[0..]);
-        _ = std.mem.replace(u8, log_instruction[0..], "%funcion_name%", log_ctxs.items[ictx].function_name, log_instruction[0..]);
-
-        var parameters: [128]u8 = undefined;
-        @memcpy(parameters[0..2], ".{");
-        const p_names = log_ctxs.items[ictx].parameter_names.items;
-        var k: usize = 2;
-        for (0..p_names.len) |j| {
-            @memcpy(parameters[k .. k + 1], ".");
-            k += 1;
-            @memcpy(parameters[k .. k + p_names[j].len], p_names[j]);
-            k += p_names[j].len;
-            @memcpy(parameters[k .. k + 3], " = ");
-            k += 3;
-            @memcpy(parameters[k .. k + p_names[j].len], p_names[j]);
-            k += p_names[j].len;
-            if (j < p_names.len - 1) {
-                @memcpy(parameters[k .. k + 2], ", ");
-                k += 2;
-            }
-        }
-
-        @memcpy(parameters[k .. k + 1], "}");
-        k += 1;
-        var buf1: [256]u8 = undefined;
-        _ = std.mem.replace(u8, log_instruction[0..], "%parameters%", parameters[0..k], buf1[0..]);
-        const last = std.mem.find(u8, buf1[0..], &[_]u8{';'});
-        insertText(file_path, log_ctxs.items[ictx].byte_offset, buf1[0 .. last.? + 1]);
+        log_instruction = createLoggingInstruction(log_ctxs.items[i], log_instruction[0..]);
+        insertText(file_path, log_ctxs.items[i].byte_offset, log_instruction);
     }
+}
+
+fn createLoggingInstruction(log_ctx: LogContext, log_instruction: []u8) []u8 {
+    const tmp = "std.log.info(\"%file_name% @ %line%:%column% - %funcion_name%: {any}\", .{%parameters%});";
+    @memcpy(log_instruction[0..tmp.len], tmp[0..]);
+    var buf: [64]u8 = undefined;
+    _ = std.mem.replace(u8, log_instruction[0..], "%file_name%", log_ctx.file_name, log_instruction[0..]);
+    _ = std.mem.replace(u8, log_instruction[0..], "%line%", toString(buf[0..], log_ctx.function_location.line), log_instruction[0..]);
+    _ = std.mem.replace(u8, log_instruction[0..], "%column%", toString(buf[0..], log_ctx.function_location.column), log_instruction[0..]);
+    _ = std.mem.replace(u8, log_instruction[0..], "%funcion_name%", log_ctx.function_name, log_instruction[0..]);
+
+    var parameters: [128]u8 = undefined;
+    @memcpy(parameters[0..2], ".{");
+    const p_names = log_ctx.parameter_names.items;
+    var k: usize = 2;
+    for (0..p_names.len) |j| {
+        @memcpy(parameters[k .. k + 1], ".");
+        k += 1;
+        @memcpy(parameters[k .. k + p_names[j].len], p_names[j]);
+        k += p_names[j].len;
+        @memcpy(parameters[k .. k + 3], " = ");
+        k += 3;
+        @memcpy(parameters[k .. k + p_names[j].len], p_names[j]);
+        k += p_names[j].len;
+        if (j < p_names.len - 1) {
+            @memcpy(parameters[k .. k + 2], ", ");
+            k += 2;
+        }
+    }
+
+    @memcpy(parameters[k .. k + 1], "}");
+    k += 1;
+    var buf1: [256]u8 = undefined;
+    _ = std.mem.replace(u8, log_instruction[0..], "%parameters%", parameters[0..k], buf1[0..]);
+    const last = std.mem.find(u8, buf1[0..], &[_]u8{';'});
+    return buf1[0 .. last.? + 1];
 }
 
 fn toString(buf: []u8, value: anytype) []u8 {
