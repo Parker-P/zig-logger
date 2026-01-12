@@ -1,7 +1,6 @@
 const std = @import("std");
 
-pub export fn sum(a: i32, b: i32) i32 {
-    std.log.info("example.zig @ 3:14 - sum: {any}", .{.{ .a = a, .b = b }});
+pub export fn sum(a: i32, b: i32) i32 {std.log.info("example.zig @ 3:14 - sum: {any}", .{.{.a = a, .b = b} = rs%});rstd.log.info("example.zig @ 3:14 - sum: {any}", .{.{.a = a, .b = b} = rs%});r
     return a + b;
 }
 

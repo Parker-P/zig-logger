@@ -47,16 +47,18 @@ fn injectLogCalls(allocator: std.mem.Allocator, project_directory: []const u8) v
     defer zig_file_paths.deinit(allocator);
 
     for (0..zig_file_paths.items.len) |i| {
+        std.debug.print("Parsing file {s}\n", .{zig_file_paths.items[i]});
         var tree = parseZigFile(allocator, zig_file_paths.items[i]) catch |e| @panic(@errorName(e));
-        const functions_info = getFunctionsInfo(allocator, tree, zig_file_paths.items[i]);
-        injectLogInstructions();
+        var functions_info: std.ArrayList(LogContext) = .empty;
+        defer functions_info.deinit(allocator);
+        getFunctionsInfo(allocator, tree, zig_file_paths.items[i], &functions_info);
+        injectLogInstructions(functions_info, zig_file_paths.items[i]);
         tree.deinit(allocator);
     }
 }
 
 fn detectZigFiles(allocator: std.mem.Allocator, project_directory: []const u8) std.ArrayList([]u8) {
     var zig_files: std.ArrayList([]u8) = .empty;
-
     const dir_handle = std.fs.openDirAbsolute(project_directory, .{ .iterate = true }) catch |e| @panic(@errorName(e));
 
     var walker = std.fs.Dir.walk(dir_handle, allocator) catch |e| @panic(@errorName(e));
@@ -92,10 +94,8 @@ fn parseZigFile(allocator: std.mem.Allocator, file_path: []u8) !ast {
     return try ast.parse(allocator, source, .zig);
 }
 
-fn getFunctionsInfo(allocator: std.mem.Allocator, tree: ast, file_path: []u8) std.ArrayList(LogContext) {
+fn getFunctionsInfo(allocator: std.mem.Allocator, tree: ast, file_path: []u8, out_functions_info: *std.ArrayList(LogContext)) void {
     const TokenTag = std.zig.Token.Tag;
-    var log_ctxs: std.ArrayList(LogContext) = .empty;
-    defer log_ctxs.deinit(allocator);
     var i: i32 = -1;
     while (i < tree.tokens.len - 1) {
         i += 1;
@@ -140,28 +140,35 @@ fn getFunctionsInfo(allocator: std.mem.Allocator, tree: ast, file_path: []u8) st
         tag = tree.tokenTag(@intCast(i));
         if (tag != TokenTag.l_brace) continue;
         log_context.byte_offset = @intCast(tree.tokenStart(@intCast(i)) + 1);
-        log_ctxs.append(allocator, log_context) catch |e| @panic(@errorName(e));
+        out_functions_info.*.append(allocator, log_context) catch |e| @panic(@errorName(e));
     }
-
-    return log_ctxs;
 }
 
 fn injectLogInstructions(log_ctxs: std.ArrayList(LogContext), file_path: []const u8) void {
     for (0..log_ctxs.items.len) |i| {
-        var log_instruction: [200]u8 = undefined;
-        log_instruction = createLoggingInstruction(log_ctxs.items[i], log_instruction[0..]);
+        var buf: [256]u8 = undefined;
+        const log_instruction = createLoggingInstruction(log_ctxs.items[i], &buf);
         insertText(file_path, log_ctxs.items[i].byte_offset, log_instruction);
     }
 }
 
-fn createLoggingInstruction(log_ctx: LogContext, log_instruction: []u8) []u8 {
+fn createLoggingInstruction(log_ctx: LogContext, buffer: *[256]u8) []u8 {
     const tmp = "std.log.info(\"%file_name% @ %line%:%column% - %funcion_name%: {any}\", .{%parameters%});";
-    @memcpy(log_instruction[0..tmp.len], tmp[0..]);
+    @memcpy(buffer[0..tmp.len], tmp[0..]);
+    var last = tmp.len;
     var buf: [64]u8 = undefined;
-    _ = std.mem.replace(u8, log_instruction[0..], "%file_name%", log_ctx.file_name, log_instruction[0..]);
-    _ = std.mem.replace(u8, log_instruction[0..], "%line%", toString(buf[0..], log_ctx.function_location.line), log_instruction[0..]);
-    _ = std.mem.replace(u8, log_instruction[0..], "%column%", toString(buf[0..], log_ctx.function_location.column), log_instruction[0..]);
-    _ = std.mem.replace(u8, log_instruction[0..], "%funcion_name%", log_ctx.function_name, log_instruction[0..]);
+
+    _ = std.mem.replace(u8, buffer[0..last], "%file_name%", log_ctx.file_name, buffer);
+    last = std.mem.find(u8, buffer[0..], &[_]u8{';'}).? + 1;
+
+    _ = std.mem.replace(u8, buffer[0..last], "%line%", toString(buf[0..], log_ctx.function_location.line), buffer);
+    last = std.mem.find(u8, buffer[0..], &[_]u8{';'}).? + 1;
+
+    _ = std.mem.replace(u8, buffer[0..last], "%column%", toString(buf[0..], log_ctx.function_location.column), buffer);
+    last = std.mem.find(u8, buffer[0..], &[_]u8{';'}).? + 1;
+
+    _ = std.mem.replace(u8, buffer[0..last], "%funcion_name%", log_ctx.function_name, buffer);
+    last = std.mem.find(u8, buffer[0..], &[_]u8{';'}).? + 1;
 
     var parameters: [128]u8 = undefined;
     @memcpy(parameters[0..2], ".{");
@@ -184,25 +191,43 @@ fn createLoggingInstruction(log_ctx: LogContext, log_instruction: []u8) []u8 {
 
     @memcpy(parameters[k .. k + 1], "}");
     k += 1;
-    var buf1: [256]u8 = undefined;
-    _ = std.mem.replace(u8, log_instruction[0..], "%parameters%", parameters[0..k], buf1[0..]);
-    const last = std.mem.find(u8, buf1[0..], &[_]u8{';'});
-    return buf1[0 .. last.? + 1];
+    std.debug.print("Parsing file {s}\n", .{buffer[0..last]});
+    _ = std.mem.replace(u8, buffer[0..last], "%parameters%", parameters[0..k], buffer);
+    last = std.mem.find(u8, buffer[0..], &[_]u8{';'}).? + 1;
+    std.debug.print("Parsing file {s}\n", .{buffer[0..last]});
+    return buffer[0 .. last + 1];
+}
+
+pub fn replaceInFixedBuffer(comptime buffer_size: comptime_int, haystack: []const u8, needle: []const u8, replacement: []const u8, buffer: *[buffer_size]u8) ![]u8 {
+    if (needle.len == 0) {
+        return error.EmptyNeedle;
+    }
+
+    const replace_count = std.mem.count(u8, haystack, needle);
+    const size_delta = @as(isize, replacement.len) - @as(isize, needle.len);
+    const required_len = haystack.len + @as(usize, @intCast(@as(isize, @intCast(replace_count)) * size_delta));
+
+    if (required_len > buffer_size) {
+        return error.BufferTooSmall;
+    }
+
+    const result_len = std.mem.replace(u8, haystack, needle, replacement, buffer);
+    return buffer[0..result_len];
 }
 
 fn toString(buf: []u8, value: anytype) []u8 {
     return std.fmt.bufPrint(buf[0..], "{any}", .{value}) catch |e| @panic(@errorName(e));
 }
 
-fn insertText(file_path: []const u8, offset: usize, text: []const u8) void {
+fn insertText(file_path: []const u8, where: usize, text: []const u8) void {
     const file = std.fs.openFileAbsolute(file_path, .{ .mode = .read_write }) catch |e| @panic(@errorName(e));
     var buf: [500000]u8 = undefined;
     var tmp: [500000]u8 = undefined;
     const byte_count = file.read(buf[0..]) catch |e| @panic(@errorName(e));
     const new_byte_count = byte_count + text.len;
-    @memcpy(tmp[0..offset], buf[0..offset]);
-    @memcpy(tmp[offset .. offset + text.len], text);
-    @memcpy(tmp[offset + text.len .. new_byte_count], buf[offset..byte_count]);
+    @memcpy(tmp[0..where], buf[0..where]);
+    @memcpy(tmp[where .. where + text.len], text);
+    @memcpy(tmp[where + text.len .. new_byte_count], buf[where..byte_count]);
     file.seekTo(0) catch |e| @panic(@errorName(e));
     file.writeAll(tmp[0..new_byte_count]) catch |e| @panic(@errorName(e));
 }
