@@ -52,6 +52,7 @@ fn injectLogCalls(allocator: std.mem.Allocator, project_directory: []const u8) v
         var functions_info: std.ArrayList(LogContext) = .empty;
         defer functions_info.deinit(allocator);
         getFunctionsInfo(allocator, tree, zig_file_paths.items[i], &functions_info);
+        std.debug.print("Found {d} functions\n", .{functions_info.items.len});
         injectLogInstructions(functions_info, zig_file_paths.items[i]);
         tree.deinit(allocator);
     }
@@ -152,23 +153,28 @@ fn injectLogInstructions(log_ctxs: std.ArrayList(LogContext), file_path: []const
     }
 }
 
-fn createLoggingInstruction(log_ctx: LogContext, buffer: *[256]u8) []u8 {
-    const tmp = "std.log.info(\"%file_name% @ %line%:%column% - %funcion_name%: {any}\", .{%parameters%});";
-    @memcpy(buffer[0..tmp.len], tmp[0..]);
+fn createLoggingInstruction(log_ctx: LogContext, output_buffer: *[256]u8) []u8 {
+    const tmp = "std.log.info(\"%file_name% @ %line%:%column% - %funcion_name%: {any}\", .{%params%});";
+    @memcpy(output_buffer[0..tmp.len], tmp[0..]);
     var last = tmp.len;
     var buf: [64]u8 = undefined;
+    var replacement_buffer: [256]u8 = undefined;
 
-    _ = std.mem.replace(u8, buffer[0..last], "%file_name%", log_ctx.file_name, buffer);
-    last = std.mem.find(u8, buffer[0..], &[_]u8{';'}).? + 1;
+    _ = std.mem.replace(u8, output_buffer[0..last], "%file_name%", log_ctx.file_name, replacement_buffer[0..]);
+    @memcpy(output_buffer, &replacement_buffer);
+    last = std.mem.find(u8, output_buffer[0..], &[_]u8{';'}).? + 1;
 
-    _ = std.mem.replace(u8, buffer[0..last], "%line%", toString(buf[0..], log_ctx.function_location.line), buffer);
-    last = std.mem.find(u8, buffer[0..], &[_]u8{';'}).? + 1;
+    _ = std.mem.replace(u8, output_buffer[0..last], "%line%", toString(buf[0..], log_ctx.function_location.line), replacement_buffer[0..]);
+    @memcpy(output_buffer, &replacement_buffer);
+    last = std.mem.find(u8, output_buffer[0..], &[_]u8{';'}).? + 1;
 
-    _ = std.mem.replace(u8, buffer[0..last], "%column%", toString(buf[0..], log_ctx.function_location.column), buffer);
-    last = std.mem.find(u8, buffer[0..], &[_]u8{';'}).? + 1;
+    _ = std.mem.replace(u8, output_buffer[0..last], "%column%", toString(buf[0..], log_ctx.function_location.column), replacement_buffer[0..]);
+    @memcpy(output_buffer, &replacement_buffer);
+    last = std.mem.find(u8, output_buffer[0..], &[_]u8{';'}).? + 1;
 
-    _ = std.mem.replace(u8, buffer[0..last], "%funcion_name%", log_ctx.function_name, buffer);
-    last = std.mem.find(u8, buffer[0..], &[_]u8{';'}).? + 1;
+    _ = std.mem.replace(u8, output_buffer[0..last], "%funcion_name%", log_ctx.function_name, replacement_buffer[0..]);
+    @memcpy(output_buffer, &replacement_buffer);
+    last = std.mem.find(u8, output_buffer[0..], &[_]u8{';'}).? + 1;
 
     var parameters: [128]u8 = undefined;
     @memcpy(parameters[0..2], ".{");
@@ -191,28 +197,11 @@ fn createLoggingInstruction(log_ctx: LogContext, buffer: *[256]u8) []u8 {
 
     @memcpy(parameters[k .. k + 1], "}");
     k += 1;
-    std.debug.print("Parsing file {s}\n", .{buffer[0..last]});
-    _ = std.mem.replace(u8, buffer[0..last], "%parameters%", parameters[0..k], buffer);
-    last = std.mem.find(u8, buffer[0..], &[_]u8{';'}).? + 1;
-    std.debug.print("Parsing file {s}\n", .{buffer[0..last]});
-    return buffer[0 .. last + 1];
-}
 
-pub fn replaceInFixedBuffer(comptime buffer_size: comptime_int, haystack: []const u8, needle: []const u8, replacement: []const u8, buffer: *[buffer_size]u8) ![]u8 {
-    if (needle.len == 0) {
-        return error.EmptyNeedle;
-    }
-
-    const replace_count = std.mem.count(u8, haystack, needle);
-    const size_delta = @as(isize, replacement.len) - @as(isize, needle.len);
-    const required_len = haystack.len + @as(usize, @intCast(@as(isize, @intCast(replace_count)) * size_delta));
-
-    if (required_len > buffer_size) {
-        return error.BufferTooSmall;
-    }
-
-    const result_len = std.mem.replace(u8, haystack, needle, replacement, buffer);
-    return buffer[0..result_len];
+    _ = std.mem.replace(u8, output_buffer[0..last], "%params%", parameters[0..k], replacement_buffer[0..]);
+    @memcpy(output_buffer, &replacement_buffer);
+    last = std.mem.find(u8, output_buffer[0..], &[_]u8{';'}).? + 1;
+    return output_buffer[0..last];
 }
 
 fn toString(buf: []u8, value: anytype) []u8 {
