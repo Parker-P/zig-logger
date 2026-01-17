@@ -36,40 +36,37 @@ const LogContext = struct {
     }
 };
 
-fn printArgs(allocator: std.mem.Allocator) void {
+fn getProjectPathFromArguments(allocator: std.mem.Allocator, buffer: []u8) usize {
     var args = std.process.argsWithAllocator(allocator) catch |e| @panic(@errorName(e));
     while (args.next() != null) {}
-    // std.debug.print("{s}", .{args.inner.buffer});
     var split = std.mem.splitAny(u8, args.inner.buffer, &[_]u8{0});
-    var arg = split.next();
-    while (arg != null) {
-        std.debug.print("{s}\n", .{arg.?});
-        arg = split.next();
-    }
+    _ = split.next();
+    var project_dir = split.next().?;
+    @memcpy(buffer[0..project_dir.len], project_dir[0..]);
+    return project_dir.len;
 }
 
 pub fn main() !void {
     var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_allocator.deinit();
     const allocator = arena_allocator.allocator();
-    printArgs(allocator);
-    // const project_directory = "C:/code/zig-logger/src";
-    // // const project_directory = "/home/Paolo/code/zig-playground";
+    var project_directory: [512]u8 = undefined;
+    const len = getProjectPathFromArguments(allocator, &project_directory);
 
-    // var zig_file_paths = detectZigFiles(allocator, project_directory);
-    // defer zig_file_paths.deinit(allocator);
+    var zig_file_paths = detectZigFiles(allocator, project_directory[0..len]);
+    defer zig_file_paths.deinit(allocator);
 
-    // for (0..zig_file_paths.items.len) |i| {
-    //     std.debug.print("Parsing file {s}\n", .{zig_file_paths.items[i]});
-    //     var tree = parseZigFile(allocator, zig_file_paths.items[i]) catch |e| @panic(@errorName(e));
-    //     defer tree.deinit(allocator);
-    //     var functions_info: std.ArrayList(LogContext) = .empty;
-    //     defer functions_info.deinit(allocator);
-    //     getFunctionsInfo(allocator, tree, zig_file_paths.items[i], &functions_info);
-    //     std.debug.print("Found {d} functions\n", .{functions_info.items.len});
-    //     injectLogInstructions(allocator, functions_info, zig_file_paths.items[i]);
-    //     formatZigFile(allocator, zig_file_paths.items[i]);
-    // }
+    for (0..zig_file_paths.items.len) |i| {
+        std.debug.print("Parsing file {s}\n", .{zig_file_paths.items[i]});
+        var tree = parseZigFile(allocator, zig_file_paths.items[i]) catch |e| @panic(@errorName(e));
+        defer tree.deinit(allocator);
+        var functions_info: std.ArrayList(LogContext) = .empty;
+        defer functions_info.deinit(allocator);
+        getFunctionsInfo(allocator, tree, zig_file_paths.items[i], &functions_info);
+        std.debug.print("Found {d} functions\n", .{functions_info.items.len});
+        injectLogInstructions(allocator, functions_info, zig_file_paths.items[i]);
+        formatZigFile(allocator, zig_file_paths.items[i]);
+    }
 }
 
 fn detectZigFiles(allocator: std.mem.Allocator, project_directory: []const u8) std.ArrayList([]u8) {
@@ -79,22 +76,13 @@ fn detectZigFiles(allocator: std.mem.Allocator, project_directory: []const u8) s
     var walker = std.fs.Dir.walk(dir_handle, allocator) catch |e| @panic(@errorName(e));
     defer walker.deinit();
 
-    var file_count: usize = 0;
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
 
     while (walker.next() catch |e| @panic(@errorName(e))) |entry| {
         const dir_path = entry.dir.realpath(".", &path_buf) catch |e| @panic(@errorName(e));
-
-        const full_path = std.mem.concat(allocator, u8, &[_][]const u8{
-            dir_path,
-            &[_]u8{std.fs.path.sep},
-            entry.path,
-        }) catch |e| @panic(@errorName(e));
-
+        const full_path = std.mem.concat(allocator, u8, &[_][]const u8{ dir_path, &[_]u8{std.fs.path.sep}, entry.path }) catch |e| @panic(@errorName(e));
         if (!std.mem.endsWith(u8, full_path, ".zig")) continue;
-
         zig_files.append(allocator, full_path) catch |e| @panic(@errorName(e));
-        file_count += 1;
     }
 
     return zig_files;
