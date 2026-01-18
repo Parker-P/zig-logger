@@ -36,14 +36,29 @@ const LogContext = struct {
     }
 };
 
-fn getProjectPathFromArguments(allocator: std.mem.Allocator, buffer: []u8) usize {
+fn parseSettingsFromArguments(allocator: std.mem.Allocator, out_project_path: []u8, no_params: *bool) !usize {
     var args = std.process.argsWithAllocator(allocator) catch |e| @panic(@errorName(e));
     while (args.next() != null) {}
     var split = std.mem.splitAny(u8, args.inner.buffer, &[_]u8{0});
     _ = split.next();
-    var project_dir = split.next().?;
-    @memcpy(buffer[0..project_dir.len], project_dir[0..]);
-    return project_dir.len;
+    var project_dir = split.next();
+    if (std.fs.path.dirname(project_dir.?) == null) {
+        std.log.err("Folder invalid not provided\n", .{});
+        return error.NoFolderProvided;
+    }
+    @memcpy(out_project_path[0..project_dir.?.len], project_dir.?[0..]);
+    const no_parameters = split.next();
+    if (no_parameters == null) {
+        std.log.info("Including parameters in log calls\n", .{});
+        return project_dir.?.len;
+    }
+    if (std.mem.eql(u8, no_parameters.?, "-noparams")) {
+        std.log.info("Excluding parameters from log calls\n", .{});
+        no_params.* = true;
+    } else {
+        std.log.info("Including parameters in log calls\n", .{});
+    }
+    return project_dir.?.len;
 }
 
 pub fn main() !void {
@@ -51,8 +66,10 @@ pub fn main() !void {
     defer arena_allocator.deinit();
     const allocator = arena_allocator.allocator();
     var project_directory: [512]u8 = undefined;
-    const len = getProjectPathFromArguments(allocator, &project_directory);
+    var no_params = true;
+    const len = try parseSettingsFromArguments(allocator, &project_directory, &no_params);
 
+    // std.debug.print("{s} - {}", .{ project_directory[0..len], no_params });
     var zig_file_paths = detectZigFiles(allocator, project_directory[0..len]);
     defer zig_file_paths.deinit(allocator);
 
@@ -64,7 +81,7 @@ pub fn main() !void {
         defer functions_info.deinit(allocator);
         getFunctionsInfo(allocator, tree, zig_file_paths.items[i], &functions_info);
         std.debug.print("Found {d} functions\n", .{functions_info.items.len});
-        injectLogInstructions(allocator, functions_info, zig_file_paths.items[i]);
+        injectLogInstructions(allocator, functions_info, zig_file_paths.items[i], no_params);
         formatZigFile(allocator, zig_file_paths.items[i]);
     }
 }
@@ -158,10 +175,10 @@ fn parseZigFile(allocator: std.mem.Allocator, file_path: []u8) !ast {
     return try ast.parse(allocator, source, .zig);
 }
 
-fn injectLogInstructions(allocator: std.mem.Allocator, log_ctxs: std.ArrayList(LogContext), file_path: []const u8) void {
+fn injectLogInstructions(allocator: std.mem.Allocator, log_ctxs: std.ArrayList(LogContext), file_path: []const u8, no_params: bool) void {
     for (0..log_ctxs.items.len) |i| {
         var buf: [256]u8 = undefined;
-        const log_instruction = createLoggingInstruction(log_ctxs.items[i], &buf);
+        const log_instruction = createLoggingInstruction(log_ctxs.items[i], &buf, no_params);
         for (i + 1..log_ctxs.items.len) |j| {
             log_ctxs.items[j].byte_offset += log_instruction.len;
             log_ctxs.items[j].function_location.line += 1;
@@ -170,8 +187,11 @@ fn injectLogInstructions(allocator: std.mem.Allocator, log_ctxs: std.ArrayList(L
     }
 }
 
-fn createLoggingInstruction(log_ctx: LogContext, output_buffer: *[256]u8) []u8 {
-    const tmp = "std.log.info(\"%file_name% @ %line%:%column% - %funcion_name%: {any}\", .{%params%});";
+fn createLoggingInstruction(log_ctx: LogContext, output_buffer: *[256]u8, no_params: bool) []u8 {
+    const tmp = if (no_params)
+        "std.log.info(\"%file_name% @ %line%:%column% - %funcion_name%\", .{});"
+    else
+        "std.log.info(\"%file_name% @ %line%:%column% - %funcion_name%: {any}\", .{%params%});";
     @memcpy(output_buffer[0..tmp.len], tmp[0..]);
     var last = tmp.len;
     var buf: [64]u8 = undefined;
@@ -193,30 +213,32 @@ fn createLoggingInstruction(log_ctx: LogContext, output_buffer: *[256]u8) []u8 {
     @memcpy(output_buffer, &replacement_buffer);
     last = std.mem.find(u8, output_buffer[0..], &[_]u8{';'}).? + 1;
 
-    var parameters: [128]u8 = undefined;
-    @memcpy(parameters[0..2], ".{");
-    const p_names = log_ctx.parameter_names.items;
-    var k: usize = 2;
-    for (0..p_names.len) |j| {
-        @memcpy(parameters[k .. k + 1], ".");
-        k += 1;
-        @memcpy(parameters[k .. k + p_names[j].len], p_names[j]);
-        k += p_names[j].len;
-        @memcpy(parameters[k .. k + 3], " = ");
-        k += 3;
-        @memcpy(parameters[k .. k + p_names[j].len], p_names[j]);
-        k += p_names[j].len;
-        if (j < p_names.len - 1) {
-            @memcpy(parameters[k .. k + 2], ", ");
-            k += 2;
+    if (!no_params) {
+        var parameters: [128]u8 = undefined;
+        @memcpy(parameters[0..2], ".{");
+        const p_names = log_ctx.parameter_names.items;
+        var k: usize = 2;
+        for (0..p_names.len) |j| {
+            @memcpy(parameters[k .. k + 1], ".");
+            k += 1;
+            @memcpy(parameters[k .. k + p_names[j].len], p_names[j]);
+            k += p_names[j].len;
+            @memcpy(parameters[k .. k + 3], " = ");
+            k += 3;
+            @memcpy(parameters[k .. k + p_names[j].len], p_names[j]);
+            k += p_names[j].len;
+            if (j < p_names.len - 1) {
+                @memcpy(parameters[k .. k + 2], ", ");
+                k += 2;
+            }
         }
+
+        @memcpy(parameters[k .. k + 1], "}");
+        k += 1;
+
+        _ = std.mem.replace(u8, output_buffer[0..last], "%params%", parameters[0..k], replacement_buffer[0..]);
+        @memcpy(output_buffer, &replacement_buffer);
     }
-
-    @memcpy(parameters[k .. k + 1], "}");
-    k += 1;
-
-    _ = std.mem.replace(u8, output_buffer[0..last], "%params%", parameters[0..k], replacement_buffer[0..]);
-    @memcpy(output_buffer, &replacement_buffer);
 
     last = std.mem.find(u8, output_buffer[0..], &[_]u8{';'}).? + 1;
     return output_buffer[0..last];
